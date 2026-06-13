@@ -1,0 +1,243 @@
+---
+title: "transcriptomics - differential analysis"
+output: html_document
+date: "2026-03-16"
+---
+
+
+### Set up environment
+
+```{r}
+# Install packages if required
+#install.packages("BiocManager", quietly=TRUE) 
+#BiocManager::install("edgeR")
+
+# Load libraries
+library("edgeR")
+
+```
+
+## Clean data
+
+### Read in data
+
+```{r}
+htseq_results <- "../results/03_htseq"
+htseq_files <- list.files(htseq_results, full.names=TRUE)
+
+htseq_data <- list()
+for (file in htseq_files){
+  if (grepl('test', file)){
+    next # Ignore any 'test' files
+  }
+  htseq_data[[file]] <- read.table(file, row.names=1)
+}
+
+names(htseq_data) <- gsub(".tsv", "", gsub(".*/", "", names(htseq_data)))
+
+```
+
+### Create htseq result dataframe
+
+```{r}
+htseq_df <- as.data.frame(htseq_data) # Convert the list to dataframe
+colnames(htseq_df) <- names(htseq_data)
+head(htseq_df)
+
+```
+## Analyse data
+
+### Assign groups and make differential gene list (EdgeR)
+
+```{r}
+# Assigning groups (group order verified via NCBI SRA search)
+groups <- c("Nlim", "Nlim", "Nlim", "Olim", "Olim", "Olim")
+design <- model.matrix(~groups) # EdgeR uses this to compare the groups.
+
+# Make a differential gene list
+diff_gene_list <- DGEList(counts=htseq_df, group=groups)
+summary(diff_gene_list)
+
+```
+
+### Deal with heteroscedasticity
+
+```{r}
+# Notice heteroscedasticity/overdispersion!
+plot(apply(htseq_df,1,mean), apply(htseq_df,1,mean))
+
+```
+
+```{r}
+# Estimate dispersion with respect to the design.
+# Calculates variance for each gene and treatment calculation, then fits that into a model.
+dispersion_adjusted_model <- estimateDisp(diff_gene_list, design)
+summary(dispersion_adjusted_model)
+
+```
+
+### Fit GLM and get differential expression result table
+
+- logFC : log-fold change
+- F : f-statistic
+- PValue : unadjusted p-value
+- FDR : false discovery rate / multiple-testing-adjusted p-value
+```{r}
+# Fit a GLM on the dispersion-adjusted model
+fit <- glmQLFit(dispersion_adjusted_model)
+glm_fit <- glmQLFTest(fit)
+
+# Prepare output tables using adjusted p-value = 0.05
+top_tags_table <- topTags(glm_fit, n=NULL, p.value=0.05)
+head(top_tags_table, 10) # 1240 rows
+
+```
+
+
+## Result comparison
+
+### Overview of genes Sedlacek et al. (2020) found significant
+
+For all of their analyses, Sedlacek et al. used a Welch's t test to determine significantly differentially transcribed genes. They did not adjust for multiple testing. They observed no significant difference in regulation of genes involved
+in the aerobic NH3-oxidation pathway. Here I provide a brief overview of their key results:
+
+1. RuBisCO-encoding genes
+"A strong decrease in transcription of RuBisCO-encoding genes during O2-limited
+growth was observed".
+- *cbbO* : non-significant difference
+- *cbbQ* : non-significant difference
+- *cbbS* : significantly more expression in NH3-limited conditions (p < 0.05)
+- *cbbL* : significantly more expression in NH3-limited conditions (p < 0.01)
+- *cbbR* : significantly more expression in O2-limited conditions (p < 0.01)
+
+2. Genes encoding the NirK and cNOR gene clusters
+
+- *nirK* : significantly more expression in NH3-limited conditions (p < 0.01)
+- *ncgC* : non-significant difference
+- *ncgB* : non-significant difference
+- *ncgA* : significantly more expression in O2-limited conditions (p < 0.05)
+- *nsrA* : significantly more expression in O2-limited conditions (p < 0.01)
+
+- *norC* : significantly more expression in O2-limited conditions (p < 0.05)
+- *norB* : non-significant difference
+- *norQ* : non-significant difference
+- *norD* : non-significant difference
+
+3. Genes encoding the A1-type and B-type HCO
+"Remarkably strong increase in transcription of the genes encoding sNOR 
+(B-type HCO)..."
+- *coxC* : significantly more in O2-limited (p < 0.01)
+- *ctgG* ""
+- *coxA* : "" (p < 0.05)
+- *coxB* :  ""
+- *senC* : "" (p < 0.01)
+- *norY* : "" (p < 0.05)
+- *norS* : ""
+
+### Create dataframe summarising Sedlacek et al. (2020)'s key findings
+```{r}
+gene_vector <- c('cbbO', 'cbbQ', 'cbbS', 'cbbL', 'cbbR',
+                 'nirK', 'ncgC', 'ncgB', 'ncgA', 'nsrA',
+                 'norC', 'norB', 'norQ', 'norD',
+                 'coxC', 'ctgG', 'coxA', 'coxB', 'senC', 'norY', 'norS')
+
+# Note: I could not find some genes on the NCBI database specifically associated
+# with N europaea (NULLs), and for some other genes, there were multiple 
+# different loci to choose from. I chose the top results in the latter case.
+locus_tag_vector <- c('ALW85_RS09990', 'ALW85_RS09995', 'ALW85_RS10000', 
+                      'NULL', 'ALW85_RS10010',
+                      'NULL', 'NULL', 'NULL', 'NULL', 'NULL',
+                      'NULL', 'ALW85_RS10430', 'ALW85_RS10435', 'ALW85_RS10440',
+                      'ALW85_RS05280', 'NULL', 'ALW85_RS05295', 'ALW85_RS05300',
+                      'ALW85_RS03565', 'NULL', 'NULL')
+category_vector <- c(1,1,1,1,1,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3)
+og_pval_vector <- c('NULL','NULL',0.05,0.01,0.01,0.01,'NULL','NULL',0.05,0.01,0.05,'NULL',
+                    'NULL','NULL',0.01,0.01,0.05,0.05,0.01,0.05,0.05)
+og_enviro_vector <- c('NULL','NULL','NH3-lim','NH3-lim','02-lim','NH3-lim','NULL',
+                      'NULL','O2-lim','O2-lim','O2-lim','NULL','NULL','NULL','O2-lim',
+                      'O2-lim','O2-lim','O2-lim','O2-lim','O2-lim','O2-lim')
+og_results <- data.frame(gene = gene_vector, 
+                         locus_tag = locus_tag_vector,
+                         category = category_vector,
+                         max_pval = og_pval_vector, 
+                         expression_environment = og_enviro_vector)
+og_results
+```
+### Compare their loci of interest to my results
+
+It appears that half of their genes of interest were not significant, yet my
+analysis revealed significant results for all of their key genes of interest
+even after multiple testing adjustment.
+I am unsure how to interpret my fold-change results, but regardless of whether
+negative fold-change means increased expression in oxygen or NH3-limited
+environments, there appears to be some discrepancy between their expression
+environments and my expression environments. For example, in their significant
+results where there is increased expression in oxygen-limited environment (4/5),
+one of my fold-changes is about -2.6, and the other three fold-changes are
+about 1.31, 0.96, and 1.08.
+
+```{r}
+# Extract locus tags to compare
+loci_in_common <- intersect(rownames(top_tags_table$table), og_results$locus_tag)
+loci_in_common
+
+# Compare my multiple-testing-adjusted f-stat FDR values to their Welches t-test 
+# unadjusted p-values
+comp_df <- data.frame(locus = loci_in_common,
+                      their_max_p = og_results[og_results$locus_tag %in% loci_in_common, 'max_pval'],
+                      their_expr_env = og_results[og_results$locus_tag %in% loci_in_common, 'expression_environment'],
+                      my_fdr = top_tags_table$table[loci_in_common, 'FDR'],
+                      my_fold_change = top_tags_table$table[loci_in_common, "logFC"])
+comp_df
+```
+
+### See where their significant results land in my table of significant results
+I am interested to see how many other things I may have found significant that
+they either did not get significant results for and thus didn't report, or simply
+glossed over.
+
+```{r}
+# Where do the loci in common fall in my result table?
+# Notice all 11 loci in common are in my result table as well.
+# Despite this, they did not get significant results for all their loci in
+# common.
+indices <- which(rownames(top_tags_table$table) %in% loci_in_common)
+loci_at_indices <- data.frame(index = indices,
+                              locus = rownames(top_tags_table$table)[indices])
+loci_at_indices
+```
+### Comparing results with absolute fold-values greater than or equal to 2
+
+It seems I have about 1000 significant results that they did not note as any of
+their key findings. However, this could also be due to the fold-change values - 
+a lower fold change is not as interesting to discuss. Let's filter my 
+significant results down to consider absolute fold values of 2 or more, and
+compare again.
+
+```{r}
+my_high_fold_results <- subset(top_tags_table$table, abs(logFC) > 2)
+head(my_high_fold_results) # Now 223 rows instead of 1240
+```
+```{r}
+# See if the same loci are still in common
+high_fold_loci_in_common <- intersect(rownames(my_high_fold_results), og_results$locus_tag)
+high_fold_loci_in_common # Only 6 loci in common now!
+```
+
+```{r}
+# Where does this new set of high-fold loci in common fall in my result table?
+indices2 <- which(rownames(my_high_fold_results) %in% high_fold_loci_in_common)
+loci_at_indices2 <- data.frame(index = indices2,
+                              locus = rownames(my_high_fold_results)[indices2])
+loci_at_indices2
+```
+### Final Notes
+I have many more significant results with a greater log-fold differential 
+expression than the selection they reported as their key results. I understand
+they were looking for some hints regarding a hypothetical protein, which may
+have caused them to narrow down their selection so that the paper is more 
+focused. I think it would be interesting to run a gene-function analysis on all
+my significant loci to compare the pathway distributions, but that is outside the
+scope of my time and abilities right now. It is possible some of the significant
+results I received were just ribosomal RNA genes, but it would be good to 
+investigate further.
