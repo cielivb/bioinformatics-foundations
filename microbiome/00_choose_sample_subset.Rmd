@@ -1,0 +1,57 @@
+---
+title: "Choose Sample Subset"
+author: "Ciel Baumann"
+date: "2026-04-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Choosing Sample Subset
+
+### Import packages
+```{r}
+#install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+library(tidyverse)
+```
+
+### Assign paths
+```{r}
+all_reads_path <- "/scratch/projects/RCH-BIOL337/BIOL337_2026/MICROBIOME/DATA/SRADATA/rawData/"
+metadata_path <- "/scratch/projects/RCH-BIOL337/BIOL337_2026/MICROBIOME/DATA/SraRunTable.csv"
+```
+
+### Get subset run IDs
+
+There are many reads available to choose from. I will find reads for adult
+tuatara collected at Takapourewa (Stephens Island), the source population.
+
+```{r}
+metadata <- read.csv(metadata_path)
+subset <- metadata %>%
+  filter(AGE == "Adult" & geo_loc_name == "New Zealand: Takapourewa")
+nrow(subset)
+```
+
+There are 34 reads meeting the above criteria. The study found sex is also a small but still significant factor, so I will limit the subset to just one sex. I chose female because there are fewer.
+
+```{r}
+table(subset$sex)
+```
+
+```{r}
+subset <- subset %>%
+  filter(sex == "female")
+```
+
+Get just the reads:
+```{r}
+run_ids <- subset$Run
+run_ids
+```
+
+### Transfer reads into working directory
+
+I transferred the read files (.fastq.gz) into my working directory (~BIOL337_26S1/mod3_microbiome/data) manually.

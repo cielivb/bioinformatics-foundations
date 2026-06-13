@@ -1,0 +1,200 @@
+---
+title: "Process Subset of Samples"
+author: "Ciel Baumann"
+date: "2026-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This RMD produces a table of ASVs for the run IDs chosen in 00_choose_sample_subset.Rmd. This script was executed on the RCH using 32 cores and multi-threading enabled because I'm impatient and it worked! I haven't tested on a single core nor on Windows.
+
+## Set-up environment
+
+### Load packages
+```{r}
+#install.packages("BiocManager")
+#BiocManager::install("dada2")
+library(dada2, quietly=TRUE, warn.conflicts=FALSE); packageVersion("dada2")
+```
+
+### Declare globals
+This RMD was created in the scripts directory of Craig's recommended directory structure. The scripts directory contained an R project so did not need to specify absolute paths.
+```{r}
+DATA_PATH = "../data"
+RESULTS_PATH = "../results"
+```
+
+
+### Load in data
+
+```{r}
+# Load in fastq data files.
+# Forward and reverse fastq filenames have format:
+# SAMPLEID_1.fastq.gz, SAMPLEID_2.fast.gz
+fw_files <- sort(list.files(DATA_PATH, pattern="_1.fastq.gz", full.names=TRUE))
+rv_files <- sort(list.files(DATA_PATH, pattern="_2.fastq.gz", full.names=TRUE))
+```
+
+```{r}
+# Extract sample names
+SAMPLE_NAMES <- sapply(strsplit(basename(fw_files), "_"), '[', 1)
+```
+
+```{r}
+# Load in metadata
+metadata <- read.csv(file=file.path(DATA_PATH, "SraRunTable.csv"))
+metadata <- metadata[metadata$Run %in% SAMPLE_NAMES, ]
+```
+
+## Trim reads
+
+### Visualise read quality profiles:
+
+#### Visualise read quality profiles for some forward reads:
+Based on the forward read quality profiles below, will trim forward reads at position 200.
+```{r}
+plotQualityProfile(fw_files[1:2])
+```
+
+#### Visualise read quality profiles for some reverse reads:
+Based on the reverse read quality profiles below, will trim reverse reads at position 150.
+```{r}
+plotQualityProfile(rv_files[1:2])
+```
+
+### Assign filter file names:
+
+```{r}
+filtFs <- file.path(RESULTS_PATH, "filtered", paste0(SAMPLE_NAMES, "_F_filt.fastq.gz"))
+filtRs <- file.path(RESULTS_PATH, "filtered", paste0(SAMPLE_NAMES, "_R_filt.fastq.gz"))
+names(filtFs) <- SAMPLE_NAMES
+names(filtRs) <- SAMPLE_NAMES
+```
+
+### Filter and trim:
+
+Using truncLen = c(280,200) eliminated the bottleneck during the merge step. However, looking at the above plots, this still seems to be a very wide range and allows a lot of error. But at least it merges.
+
+```{r}
+out <- filterAndTrim(fwd=fw_files, filt=filtFs,
+                     rev=rv_files, filt.rev=filtRs,
+                     truncLen = c(280,200), # c(fw_trunc, rv_trunc)
+                     trimLeft = c(17,19),
+                     maxN=0, # default -> DADA requires no Ns
+                     maxEE=c(5,5), # Max num of 'expected errors' in a read
+                     matchIDs=TRUE,
+                     multithread = TRUE # Requires at least 2 cores (?)
+)
+```
+
+## Prepare DADA
+
+### Learn error rates:
+
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+```
+
+### Visualise estimated error rates:
+
+The red line is the theoretical linear error rate based on quality score, while the black line is the learned error rate based on the actual datasets.
+
+```{r}
+# nominalQ = TRUE plots the expected error rates (red line)
+plotErrors(errF, nominalQ=TRUE)
+```
+
+## Apply DADA
+
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errF, multithread=TRUE)
+```
+
+```{r}
+# Inspected returned dada-class object
+# For the first forward sample, the DADA2 algorithm inferred
+# 280 true sequence variants from 14104 unique sequences
+dadaFs[[1]]
+```
+
+## Merge paired reads
+
+Aligns the denoised forward reads with the reverse-complement of the corresponding denoised reverse reads, then constructs merged “contig” sequences. “By default, merged sequences are only output if the forward and reverse reads overlap by at least 12 bases, and are identical to each other in the overlap region (but these conditions can be changed via function arguments).”
+
+```{r}
+merged <- mergePairs(dadaFs, filtFs,
+                     dadaRs, filtRs,
+                     verbose=FALSE)
+
+# Inspect the merged data.frame from the first sample
+head(merged[[6]], 10)
+```
+
+## Construct ASV (amplicon sequence variant) table
+
+This is a higher-resolution version of an OTU table. It is a matrix with rows = samples, columns = sequence variants.
+
+```{r}
+seqtab <- makeSequenceTable(merged)
+dim(seqtab)
+
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+seq_len_distr <- nchar(getSequences(seqtab))
+hist(seq_len_distr)
+```
+
+
+## Remove chimeras
+
+“Chimeric sequences are identified if they can be exactly reconstructed by combining a left-segment and a right-segment from two more abundant “parent” sequences.”
+
+```{r}
+seqtab_nochim <- removeBimeraDenovo(seqtab, method="consensus",
+                                    multithread=TRUE,
+                                    verbose=TRUE)
+dim(seqtab_nochim)
+
+# Check that most reads remain after chimera removal
+sum(seqtab_nochim)/sum(seqtab) # % remaining after chimera removal
+```
+
+
+## Track reads through the pipeline (sanity check)
+```{r}
+getN <- function(x) {
+  sum(getUniques(x))
+}
+
+track <- cbind(out,
+               sapply(dadaFs, getN),
+               sapply(dadaRs, getN),
+               sapply(merged, getN),
+               rowSums(seqtab_nochim)
+)
+
+colnames(track) <- c("input", "filtered", # out, out
+                     "denoisedF", "denoisedR", #dadaFs, dadaRs
+                     "merged", "nonchim")
+rownames(track) <- SAMPLE_NAMES
+
+head(track)
+```
+
+## Format and write ASV table to file
+
+```{r}
+# Replace column names (originally sequences) with an ASV number
+colnames(seqtab_nochim) <- paste0("ASV", seq(ncol(seqtab_nochim)))
+
+write.table(seqtab_nochim, sep=",",
+            file=file.path(RESULTS_PATH, "subset_asv_table.csv"))
+
+```
+
+

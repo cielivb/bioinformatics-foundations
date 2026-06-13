@@ -1,0 +1,147 @@
+---
+title: "microbiome_processing"
+author: "Ciel Baumann"
+date: "2026-04-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Import packages
+```{r}
+#install.packages("BiocManager")
+#BiocManager::install("phyloseq")
+#BiocManager::install("Biostrings")
+#install.packages("ggplot2")
+library(phyloseq, quietly=TRUE, warn.conflicts=FALSE); packageVersion("phyloseq")
+library(Biostrings, quietly=TRUE, warn.conflicts=FALSE); packageVersion("Biostrings")
+library(ggplot2, quietly=TRUE, warn.conflicts=FALSE); packageVersion("ggplot2")
+```
+
+### Read in data
+```{r}
+# Read in the seqtab.nochim table. The column names are the ASV sequences.
+dadaFolder="/scratch/projects/RCH-BIOL337/BIOL337_2026/MICROBIOME/DATA/fullTableData/WORK_fullDATASET/"
+seqtab.nochim=readRDS(file=paste0(dadaFolder,"/","seqtab.dada.rds"))
+
+# Read in pipeline tracking table
+tracking=readRDS(file=paste0(dadaFolder,"/","tracking.dada.rds"))
+gtdbTaxa=readRDS(file=paste0(dadaFolder,"/","gtdbTaxa.dada.rds"))
+
+# Read in metadata (SraRunTable)
+metadata <- read.csv(file="/scratch/projects/RCH-BIOL337/BIOL337_2026/MICROBIOME/DATA/SraRunTable.csv")
+
+```
+
+### Filter ASVs and Samples
+
+#### Filter ASVs 
+
+"ASVs which accounted for less than 0.001% of sequence reads across the entire data set were removed" (Hoffbeck et al., 2024). Each column in seqtab.nochim represents an ASV. I will sum along the columns and only keep columns where the sum is greater than the total number of reads.
+
+```{r}
+hist(colSums(seqtab.nochim)) # Column sums (i.e., number of reads per ASV) before filtration
+keepASVs <- which(colSums(seqtab.nochim) >= 0.001*sum(seqtab.nochim))
+filtered_seqtab_1 <- seqtab.nochim[,keepASVs]
+hist(colSums(filtered_seqtab_1)) # Column sums after filtration
+```
+#### Filter Samples
+
+"... each sample was standardised to 1400 sequence reads using the SRS function in the SRS package (Heidrich et al., 2021; ver 0.2.3), which resulted in the removal of two further samples with low sequencing depth" (Hoffbeck et al., 2024). Although we are not following the exact standardisation process they used, I will still remove samples with less than 1400 sequence reads.
+
+```{r}
+hist(rowSums(filtered_seqtab_1)) # Row sums (i.e., number of reads per sample) before filtration
+keepSamples<-which(rowSums(filtered_seqtab_1)>=1400) # This removes samples with less than 1400 reads
+filtered_seqtab_2 <-filtered_seqtab_1[keepSamples,]
+hist(rowSums(filtered_seqtab_2)) # Row sums after filtration
+```
+
+#### Get new matrix dimensions
+There are now 157 samples (rows) and 94 ASVS (columns).
+```{r}
+filtered_seqtab <- filtered_seqtab_2
+dim(filtered_seqtab)
+```
+
+### Set up a Phyloseq object
+
+#### Initialise the Phyloseq object
+```{r}
+otu_mat <- otu_table(filtered_seqtab, taxa_are_rows = FALSE) # Operational Taxonomic Unit table
+tax_mat<-tax_table(gtdbTaxa$tax) # Use taxonomies assigned via GTDB database sequences
+sampleData<-metadata[which(!is.na(match(metadata$Run,names(keepSamples)))),]
+rownames(sampleData)<-sampleData$Run # Need to ensure rownames of sample data match library names in ASV table
+sample_mat=sample_data(sampleData) # sample matrix
+
+PS_object <- phyloseq(otu_mat, tax_mat, sample_mat) # Phyloseq object
+PS_object
+```
+
+#### Remove mock community samples
+```{r}
+PS_object <- prune_samples(sample_data(PS_object)$Sample.Name != "Mock_community", PS_object)
+```
+
+#### Rename ASVs from DNA sequence to ASV1, ASV2, ...
+```{r}
+dna <- Biostrings::DNAStringSet(taxa_names(PS_object)) # Store DNA sequences in a Biostrings object
+names(dna) <- taxa_names(PS_object) # Link taxa names to DNA sequences
+PS_object <- merge_phyloseq(PS_object, dna) # Stores the DNA sequences within the Phyloseq object
+taxa_names(PS_object) <- paste0("ASV", seq(ntaxa(PS_object))) # Overwrite sequences with ASV1, ASV2, ...
+PS_object
+```
+
+
+### Create Phyloseq Plots
+
+#### Visualise Alpha-Diversity
+The red dot is a sample with missing metadata. In both plots, adults tend to have higher alpha-diversity scores than subadults, but note the sample size discrepancy. The alpha-diversity scores also show generally skewed distributions in both plots, with the peaks at a higher score. These distributions look fairly similar across all sites.
+```{r}
+plot_richness(PS_object, x="geo_loc_name", measures=c("Shannon", "Simpson"), color="AGE")
+
+```
+
+#### Ordination Plot
+```{r}
+# Transform sample abundance counts to relative proportions within a sample.
+# Each sample is a vector where each element represents a given ASV, and the 
+# value of each element is the number of counts for that ASV. Dividing the 
+# sample vector by the sum of its counts will yield a vector representing the
+# proportions of each ASV within that sample.
+PS_object.prop <- transform_sample_counts(
+  PS_object, function(sample_counts) (sample_counts)/sum(sample_counts)
+)
+ord.nmds.bray <- ordinate(PS_object.prop, method = "NMDS", distance="bray")
+plot_ordination(PS_object.prop, ord.nmds.bray, color="geo_loc_name", title="Bray NMDS")
+
+# The dots appear to cluster by location and have significnt overlap. Some more scattered than others.
+
+
+```
+#### Create Phyla and Genera Bar Plots
+In non-standardised data, it is possible that excessive number of reads within a sample can bias the results to weigh that sample's results more heavily. To address this, the authors standardised the number of reads to 1400 reads per sample (but not sure how exactly - a random subset? averaging?), whereas we applied a simple transformation to get the proportions of ASVs within a sample in the previous step.
+
+##### Create Phyla Bar Plot
+
+```{r}
+plot_bar(PS_object.prop, fill="Phylum") + 
+  facet_wrap(~geo_loc_name, scales="free_x") + 
+  theme(axis.text.x = element_blank()) + 
+  geom_bar(stat="identity")
+```
+
+##### Create Genera Bar Plot
+```{r}
+# For clarity, only use top 30 ASVs for the genus plot
+top30 <- names(sort(taxa_sums(PS_object.prop), decreasing=TRUE))[1:30]
+PS_object.prop.top30 <- prune_taxa(top30, PS_object.prop)
+
+# Plot genus plot
+plot_bar(PS_object.prop.top30, fill="Genus") + 
+  facet_wrap(~geo_loc_name, scales="free_x") + 
+  theme(axis.text.x = element_blank()) + 
+  geom_bar(stat="identity")
+```
+

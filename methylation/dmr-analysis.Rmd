@@ -1,0 +1,376 @@
+---
+title: "dmr-analysis"
+author: "Ciel Baumann"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## DMR Analysis
+
+
+### Load Environment
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Install packages
+```{r}
+#install.packages("BiocManager")
+#BiocManager::install('methylKit')
+#BiocManager::install('genomation', force=TRUE)
+```
+
+
+#### Load libraries 
+
+```{r}
+library(methylKit, quietly=TRUE)
+library(GenomicRanges, quietly=TRUE)
+library(genomation, quietly=TRUE) # Used for annotation of DMBs/DMRs
+```
+
+
+#### Load data files
+
+The coverage files contain %-methylation score per base for each sample, and are output from the Bismark Aligner.
+
+```{r}
+# Get coverage file locations
+cov_dir <- "../results/03_bismark_coverage/"
+location_vector <- c() # List of locations of BAM files
+all_files <- list.files(cov_dir, full.names = TRUE)
+for (file in all_files){
+  if (endsWith(file, ".cov.gz")){
+    location_vector <- append(location_vector, file)
+  }
+}
+
+# Get sample METADATA
+METADATA <- read.csv("../data/SraRunTable.txt")
+METADATA$file <- location_vector
+FETAL_METADATA <- METADATA[METADATA$Age=="E21",]
+NUM_SAMPLES <- nrow(FETAL_METADATA)
+
+# Encode control as 0, hypoxic as 1
+treatment_vector <- data.table::fifelse(FETAL_METADATA$treatment == 'control', 0, 1)
+
+# Create initial methylraw object
+meth_raw = methRead(location = as.list(FETAL_METADATA$file),
+                    sample.id = as.list(FETAL_METADATA$Run),
+                    assembly = "hg18",
+                    context = "CpG",
+                    treatment = treatment_vector,
+                    pipeline = "bismarkCoverage",
+                    mincov = 3)
+
+# Remove obsolete environment variables
+rm(all_files, cov_dir, location_list, file, treatment_vector)
+```
+
+Read in the gene BED file and CpG island annotation file to use for annotation later:
+
+```{r}
+# The gene data file is a .bed.txt.gz file
+gene_data_path <- "../data/genome/Genes.bed.txt.gz"
+GENE_DATA = readTranscriptFeatures(gene_data_path)
+
+# The CpG island annotation file is also a .bed.txt.gz file
+shore_data_path <- "../data/genome/CpG.bed.txt.gz"
+SHORE_DATA = readFeatureFlank(shore_data_path)
+
+rm(gene_data_path, shore_data_path, METADATA)
+```
+
+
+### Clean Unmerged Data
+
+#### Initial raw data exploration
+
+##### View Histogram of % CpG methylation
+
+If everything has been done right, there should be a peak at each end. This is 
+because methylation is a one-or-none thing - a base is either methylated, or it
+is not. I don't fully understand why the middle section shows anything, but 
+imagine it is reflective of uncertainty in the analysis. The active code snippet
+below shows the histogram for the first sample only, but uncommenting the 
+rest of the below code snippet shows that all samples follow the same distribution.
+
+```{r}
+# View % CpG methylation histogram for first sample only
+getMethylationStats(meth_raw[[1]], plot=TRUE, both.strands=FALSE)
+
+# View histogram for each sample
+#par(mfrow = c(NUM_SAMPLES/2, NUM_SAMPLES/2))
+#for (sample_i in seq(1, NUM_SAMPLES)){
+#  getMethylationStats(meth_raw[[sample_i]], plot = TRUE, both.strands = FALSE)
+#}
+```
+
+##### View Histogram of CpG coverage on first sample
+
+"Experiments highly suffering from PCR duplication bias will have a secondary peak towards the right hand side" (methylKit.Knit, n.d.). These samples do not appear to have this issue.
+
+```{r}
+# View CpG coverage histogram for first sample only
+getCoverageStats(meth_raw[[1]], plot=TRUE, both.strands=FALSE)
+
+# View CpG coverage histogram for each sample - same distributions for all
+#par(mfrow = c(NUM_SAMPLES/2, NUM_SAMPLES/2))
+#for (sample_i in seq(1, NUM_SAMPLES)){
+#  getCoverageStats(meth_raw[[sample_i]], plot=TRUE, both.strands=FALSE)
+#}
+#rm(sample_i)
+```
+
+#### Filter samples based on read coverage
+
+If samples are suffering PCR duplication bias, it is useful to discard bases with very high read coverage (methylKit.Knit, n.d.). These samples do not appear to have this issue, but it doesn't hurt to apply the upper filter anyway. 
+
+More relevant to this analysis is choosing a minimum read coverage. I originally used a (somewhat arbitrary) minimum read coverage of 10, but this value was far too restrictive, and I didn't get any results. I toyed around with other smaller values but most were still too restrictive. In the end, I chose to use a minimum read coverage of 3, due to the very small sample size (3 samples per group). This averages out to one read per sample per group at minimum, which is still quite restrictive but not so much that I get no results.
+
+```{r}
+getCoverageStats(meth_raw[[1]], plot=FALSE, both.strands = FALSE)
+
+MIN_READ_COVERAGE = 3
+meth_filtered = filterByCoverage(meth_raw,
+                                lo.count=MIN_READ_COVERAGE,
+                                lo.perc=NULL,
+                                hi.count=NULL,
+                                hi.perc=99.9)
+```
+
+#### Normalise coverage values
+
+This is only essential if the coverage is not similar across samples, but doesn't hurt to include (methylKit.Knit, n.d.).
+
+```{r}
+meth_normalised = normalizeCoverage(meth_filtered, method = "median")
+```
+
+
+### Merge Samples and Filter Further
+
+The unite function has a min.per.group option, which defaults to keeping only 
+the bases/regions that are covered in all samples. I am using this default option
+as the sample size is very small, and adjusting this to a value smaller than 3
+will decrease the power of this analysis (which already lacks power) even further.
+
+The unite function also has a destrand option (default = FALSE). Using destrand
+= TRUE improves coverage by merging the reads on both strands of a CpG island 
+(methylKit.Knit, n.d.). More coverage seems helpful in this case due to the 
+small sample size, so I originally using destrand = TRUE. However, this is not
+compatible with the using the default min.per.group which I consider more 
+important for the analysis, so I am using destrand = FALSE instead.
+
+```{r}
+#meth = unite(meth_filtered, destrand=TRUE) # No base united error
+meth = unite(meth_filtered, destrand=FALSE)
+head(meth)
+```
+```{r}
+# Remove obsolete methylkit objects from environment
+rm(meth_normalised, meth_filtered, meth_raw)
+```
+
+#### Remove non-variable CpGs from merged dataset
+
+"High-throughput methylation data contains a lot of CpG sites that have no or little variation among study subjects and are not all that informative for downstream analyses" (methylKit.Knit, n.d.). Standard deviation filtering on methylation ratio values "will lower the number of tests to be performed, thus reducing multiple correction penalities" (methylKit.Knit, n.d.).
+
+The below histogram reveals a large peak on the left, which represents the CpG sites with no differential methylation in this analysis. To increase the power of this analysis and reduce multiple testing penalties, I am removing these CpG sites from the dataset.
+
+```{r}
+# Get CpG standard deviations and visualise their distribution
+standard_deviations <- matrixStats::rowSds(percMethylation(meth))
+hist(standard_deviations, breaks = 100)
+```
+
+```{r}
+# Keep only CpGs with standard deviations larger than 2%
+meth <- meth[standard_deviations > 2]
+nrow(meth)
+rm(standard_deviations)
+```
+
+#### Remove known C -> T mutations (if applicable) (SKIPPED)
+
+This step is out of the scope of this analysis. 
+
+#### Check sample correlations and cluster based on methylation profile similarities
+
+Looking at the correlation plot, each sample is fairly highly positively correlated regardless of group, showing similar methylation profiles across the board. 
+
+Looking at the PC1-PC2 plot: on the PC1 axis, the red sample on the right almost appears as though it could be an outlier, though with such a small sample size, it's impossible to actually say. With the assumption the variation is the PC1 axis really is due to the red outlier, the PC2 axis appears more important, showing a potential cluster of blue samples at the bottom, and a potential cluster of red samples at the top. Although these clusters at first appear to be well defined, it is important to remember that there are only 3 samples per group, so this pattern could very easily be due to chance. If we re-ran this experiment with many more samples, these clusters could appear quite different and potentially overlap.
+
+PC2 and PC3 appear to have similar importance, so I have generated a PC2-PC3 plot as well. Again, with so few samples, it's impossible to really say much about this plot. The situation is very similar to the PC1-PC2 plot - if we treat the far left blue dot as a potential outlier, we can see there *may* be two clusters. However, this is probably just due to chance.
+
+```{r}
+# Check sample correlations
+getCorrelation(meth, plot=TRUE) # high positive correlation between all samples
+```
+
+```{r}
+# Generate PCA analysis scree plot to show component importances
+PCASamples(meth, screeplot = TRUE)
+```
+
+```{r}
+PCASamples(meth, comp = c(1,2)) # View PC1 and PC2 axes
+```
+```{r}
+PCASamples(meth, comp = c(2,3)) # View PC2 and PC3 axes
+```
+
+#### Accounting for batch effects (SKIPPED)
+
+Not enough metadata.
+
+### Finding DMBs/DMRs
+
+Here I am computing the differential methylation p-values and q-values using an F-test. Using adjust='BH' calculates the q-values (i.e., adjusted p-values) using the Benjamini-Hochberg adjustment. I am unsure if this dataset actually needs an overdispersion adjustment, but I can't imagine it would hurt to include anyway since it's just scaling the variance of the dataset so that the dataset has a constant variance, so I used overdispersion="MN" to do so. Applying this overdispersion correction causes the computation to default to using an F-test, which I have no issue with.
+```{r}
+diffs = calculateDiffMeth(meth,
+                          adjust = "BH",
+                          overdispersion="MN")
+head(diffs)
+```
+
+#### Select hyper-methylated bases, hypo-methylated bases, and all differentially methylated bases
+
+Using q-value <= 0.01 and %-diff >= 25% gave me only one significant result, so I decided to relax these parameters slightly to a threshold of percent-methylation difference >= 20%, and q-value (adjusted p-value) <= 0.05. These values strike a balance between generosity and remaining sensible within the context of this analysis.
+
+Overall, 4 CpG sites are significantly hypermethylated, and 6 are hypomethylated.
+
+```{r}
+diffs_hyper = getMethylDiff(diffs, difference=20, qvalue=0.05, type="hyper")
+diffs_hypo = getMethylDiff(diffs, difference=20, qvalue=0.05, type="hypo")
+diffs_all = getMethylDiff(diffs, difference=20, qvalue=0.05)
+
+# View % of hypo/hyper methylated bases over all covered bases in a given chromosome.
+diffMethPerChr(diffs, plot=FALSE, qvalue.cutoff=0.05, meth.cutoff=20)
+```
+
+#### Annotate DMBs
+
+```{r}
+# Rename chr variable to ensure compatibility with annotation functions
+diffs_all$chr="chr13"
+diffs_hyper$chr="chr13"
+diffs_hypo$chr="chr13"
+```
+
+```{r}
+# Annotate hyper- and hypo-methylated gene parts (promoters, exons, introns, intergenic)
+diffs_hyper_ann_parts <- annotateWithGeneParts(target=as(diffs_hyper, "GRanges"), feature=GENE_DATA)
+diffs_hypo_ann_parts <- annotateWithGeneParts(target=as(diffs_hypo, "GRanges"), feature=GENE_DATA)
+
+# Annotate hyper- and hypo-methylated CpG shores
+diffs_hyper_ann_shores <- annotateWithFeatureFlank(target=as(diffs_hyper, "GRanges"), 
+                                                  feature=SHORE_DATA$features,
+                                                  flank=SHORE_DATA$flanks,
+                                                  feature.name="CpGi",
+                                                  flank.name="shores")
+diffs_hypo_ann_shores <- annotateWithFeatureFlank(target=as(diffs_hypo, "GRanges"), 
+                                                  feature=SHORE_DATA$features,
+                                                  flank=SHORE_DATA$flanks,
+                                                  feature.name="CpGi",
+                                                  flank.name="shores")
+```
+
+```{r}
+# Plot annotations
+par(mfrow = c(2,2))
+plotTargetAnnotation(diffs_hyper_ann_parts, precedence = TRUE,
+                     main = "Hypermethylated Gene Parts")
+plotTargetAnnotation(diffs_hypo_ann_parts, precedence = TRUE,
+                     main = "Hypomethylated Gene Parts")
+plotTargetAnnotation(diffs_hyper_ann_shores, precedence = TRUE,
+                     main = "Hypermethylated Shores")
+plotTargetAnnotation(diffs_hypo_ann_shores, precedence = TRUE,
+                     main = "Hypomethylated Gene Shores")
+```
+
+#### Summarise methylation info over different regions
+There appear to be no regions in common between the groups?
+```{r}
+regionCounts(meth, GENE_DATA$exons) # No sequence levels in common warning - 0 rows
+regionCounts(meth, GENE_DATA$introns) # No sequence levels in common warning - 0 rows
+regionCounts(meth, GENE_DATA$promoters) # No sequence levels in common warning - 0 rows
+regionCounts(meth, GENE_DATA$TSSes) # No sequence levels in common warning - 0 rows
+```
+
+#### Get % of intron/exon/promoters that overlap with DMBs
+
+```{r}
+getFeatsWithTargetsStats(diffs_hyper_ann_parts, percentage = TRUE) # 0
+getFeatsWithTargetsStats(diffs_hypo_ann_parts, percentage = TRUE) # 0
+```
+
+#### Find out which genes are hyper-/hypo-methylated
+
+##### Get distances to TSS and nearest gene names
+```{r}
+tsses_assoc_w_hyper = getAssociationWithTSS(diffs_hyper_ann_parts)
+tsses_assoc_w_hypo = getAssociationWithTSS(diffs_hypo_ann_parts)
+write.table(tsses_assoc_w_hyper, file='tsses_assoc_w_hyper.csv', sep=",")
+write.table(tsses_assoc_w_hypo, file='tsses_assoc_w_hypo.csv', sep=",")
+```
+
+##### Associate TSSes with nearby genes
+
+The data in this step is gathered manually by searching for the transcript accession names in the NCBI Nucleotide Genbank database, and following the path to the most recent version of that accession. A hyperlink to the associated gene is listed under the features section on each transcript's page. I gathered the gene accession and gene name from the hyperlink for each transcript. NULL values are used where "Record suppressed".
+
+```{r}
+# Create hyperymethylation dataframe of relevant genes
+hyper_assoc_gene_ids <- c("NULL",360835,60349,304827)
+hyper_assoc_gene_names <- c("NULL","Cdh19 cadherin 19","Nr5a2 nuclear receptor subfamily 5, group A, member 2","Kcnt2 potassium sodium-activated channel subfamily T member 2")
+hyper_tss_df <- data.frame(cpg_site_location = diffs_hyper$start,
+                           dist_to_feature = tsses_assoc_w_hyper$dist.to.feature,
+                           transcript_accession = tsses_assoc_w_hyper$feature.name,
+                           assoc_gene_id = hyper_assoc_gene_ids,
+                           assoc_gene_name = hyper_assoc_gene_names)
+hyper_tss_df
+```
+
+```{r}
+# Create hypoymethylation dataframe of relevant genes
+hypo_assoc_gene_ids <- c("NULL","NULL","NULL",304766,60349,304883)
+hypo_assoc_gene_names <- c("NULL","NULL","NULL","Ubxn4 UBX domain protein 4","Nr5a2 nuclear receptor subfamily 5, group A, member 2","Abl2 ABL proto-oncogene 2, non-receptor tyrosine kinase")
+hypo_tss_df <- data.frame(cpg_site_location = diffs_hypo$start,
+                          dist_to_feature = tsses_assoc_w_hypo$dist.to.feature,
+                           transcript_accession = tsses_assoc_w_hypo$feature.name,
+                           assoc_gene_id = hypo_assoc_gene_ids,
+                           assoc_gene_name = hypo_assoc_gene_names)
+hypo_tss_df
+```
+
+```{r}
+# Format result tables
+library(kableExtra)
+raw_hyper <- kable(hyper_tss_df,
+                   col.names=c('Position','Distance','Transcript',
+                               'Gene ID','Gene Name'),
+                   align='c')
+pretty_hyper <- kable_styling(raw_hyper, full_width = TRUE, position="center")
+raw_hypo <- kable(hypo_tss_df,
+                   col.names=c('Position','Distance','Transcript',
+                               'Gene ID','Gene Name'),
+                   align='c')
+pretty_hypo <- kable_styling(raw_hypo, full_width = TRUE, position="center")
+
+pretty_hyper
+pretty_hypo
+```
+
+
+
+### Sources/References
+
+Clark K, Karsch-Mizrachi I, Lipman DJ, Ostell J, Sayers EW.
+   GenBank. Nucleic Acids Res. 44(D1):D67-72 (2016)
+
+Gene [Internet]. Bethesda (MD): National Library of Medicine (US), National Center for Biotechnology Information; 2004 – [cited 2026 Apr 20]. Available from: https://www.ncbi.nlm.nih.gov/gene/
+
+methylKit.knit. (n.d.). Retrieved April 20, 2026, from https://www.bioconductor.org/packages/release/bioc/vignettes/methylKit/inst/doc/methylKit.html
+
+Nucleotide [Internet]. Bethesda (MD): National Library of Medicine (US), National Center for Biotechnology Information; 2004 – [cited 2026 Apr 20]. Available from: https://www.ncbi.nlm.nih.gov/nucleotide/
