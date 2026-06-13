@@ -1,0 +1,3 @@
+# Methylation Concepts
+
+Comprehensive RRBS methylome processing pipeline integrating multi‑stage quality control (FastQC), dual‑pass adapter and quality trimming (cutadapt), bisulfite‑aware genome alignment and methylation calling (Bismark), SAMtools‑mediated BAM handling, and high‑resolution cytosine‑level methylation extraction, followed by methylKit‑based coverage filtering, normalization, sample unification, variance‑driven CpG selection, dispersion‑aware differential methylation modelling, and downstream genomic annotation via GenomicRanges and genomation to contextualize DMBs/DMRs within gene bodies, promoters, CpG islands, and flanking regulatory landscapes.

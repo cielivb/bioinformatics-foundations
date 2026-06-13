@@ -1,0 +1,4 @@
+# Microbiome Concepts
+
+## Detailed Pipeline Description
+End‑to‑end amplicon sequencing workflow encompassing metadata‑driven sample selection, DADA2‑based preprocessing (quality profiling, adaptive trimming, error‑model learning, denoising, paired‑end merging, and chimera removal), high‑resolution ASV inference and table construction, GTDB‑informed taxonomic assignment, and phyloseq‑enabled ecological analysis including sample filtering, object integration, alpha‑diversity estimation, multivariate ordination (NMDS/Bray–Curtis), and phylum‑ and genus‑level community composition profiling across environmental gradients.

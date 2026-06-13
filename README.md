@@ -5,7 +5,6 @@
 ![Last Updated](https://img.shields.io/github/last-commit/cielivb/bioinformatics-foundations)
 ![Educational Project](https://img.shields.io/badge/Project-Educational-lightgrey)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
-**Note:** Coursework repository - for reference only
 
 # Bioinformatics Foundations
 
@@ -18,11 +17,11 @@ These scripts were written for a university HPC environment and rely on clusterâ
 This repository is divided into four miniâ€‘projects:
 
 - **Transcriptomics:** differential expression analysis using FastQC, cutadapt, BWA, SAMtools, HTSeq, and edgeR.
-- **Methylation:** TBA
-- **Microbiome:** TBA
+- **Methylation:** RRBS methylation analysis using FastQC, cutadapt, Bismark, SAMtools, Bismark methylation extractor, and methylKit for differential methylation and annotation.
+- **Microbiome:** amplicon sequencing analysis using DADA2 for ASV inference and phyloseq for diversity, ordination, and taxonomic composition.
 - **Networks:** TBA
 
-Within each mini-project, you will find a collection of scripts. Each of these scripts is designed to operate in the following top-level directory structure, where each script is in the `mini-proj/scripts/` directory:
+Within each mini-project, you will find a markdown 'concepts' document explaining the pipeline, and a collection of scripts. Each of these scripts is designed to operate in the following top-level directory structure, where each script is in the `mini-proj/scripts/` directory:
 
 ```
 mini-proj/
